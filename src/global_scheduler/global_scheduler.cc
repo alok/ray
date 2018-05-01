@@ -141,13 +141,8 @@ GlobalSchedulerState *GlobalSchedulerState_init(event_loop *loop,
                          std::vector<std::string>());
   db_attach(state->db, loop, false);
 
-  ClientTableDataT client_info;
-  client_info.client_id = get_db_client_id(state->db).binary();
-  client_info.node_manager_address = std::string(node_ip_address);
-  client_info.local_scheduler_port = 0;
-  client_info.object_manager_port = 0;
   RAY_CHECK_OK(state->gcs_client.Connect(std::string(redis_primary_addr),
-                                         redis_primary_port, client_info));
+                                         redis_primary_port));
   RAY_CHECK_OK(state->gcs_client.context()->AttachToEventLoop(loop));
   state->policy_state = GlobalSchedulerPolicyState_init();
   return state;
@@ -239,11 +234,9 @@ void add_local_scheduler(GlobalSchedulerState *state,
   handle_new_local_scheduler(state, state->policy_state, db_client_id);
 }
 
-std::unordered_map<DBClientID, LocalScheduler, UniqueIDHasher>::iterator
-remove_local_scheduler(
+std::unordered_map<DBClientID, LocalScheduler>::iterator remove_local_scheduler(
     GlobalSchedulerState *state,
-    std::unordered_map<DBClientID, LocalScheduler, UniqueIDHasher>::iterator
-        it) {
+    std::unordered_map<DBClientID, LocalScheduler>::iterator it) {
   RAY_CHECK(it != state->local_schedulers.end());
   DBClientID local_scheduler_id = it->first;
   it = state->local_schedulers.erase(it);

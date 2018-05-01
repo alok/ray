@@ -3,6 +3,7 @@ from __future__ import division
 from __future__ import print_function
 
 import pandas as pd
+from pandas import (eval, Panel, date_range, MultiIndex)
 import threading
 
 pd_version = pd.__version__
@@ -13,7 +14,7 @@ if pd_major == 0 and pd_minor < 22:
     raise Exception("In order to use Pandas on Ray, please upgrade your Pandas"
                     " version to >= 0.22.")
 
-DEFAULT_NPARTITIONS = 4
+DEFAULT_NPARTITIONS = 8
 
 
 def set_npartition_default(n):
@@ -29,10 +30,15 @@ def get_npartitions():
 # because they depend on npartitions.
 from .dataframe import DataFrame  # noqa: 402
 from .series import Series  # noqa: 402
-from .io import (read_csv, read_parquet)  # noqa: 402
+from .io import (read_csv, read_parquet, read_json, read_html,  # noqa: 402
+                 read_clipboard, read_excel, read_hdf, read_feather,  # noqa: 402
+                 read_msgpack, read_stata, read_sas, read_pickle,  # noqa: 402
+                 read_sql)  # noqa: 402
+from .concat import concat  # noqa: 402
 
 __all__ = [
-    "DataFrame", "Series", "read_csv", "read_parquet"
+    "DataFrame", "Series", "read_csv", "read_parquet", "concat", "eval",
+    "Panel", "date_range", "MultiIndex"
 ]
 
 try:

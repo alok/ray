@@ -355,13 +355,8 @@ LocalSchedulerState *LocalSchedulerState_init(
                            "local_scheduler", node_ip_address, db_connect_args);
     db_attach(state->db, loop, false);
 
-    ClientTableDataT client_info;
-    client_info.client_id = get_db_client_id(state->db).binary();
-    client_info.node_manager_address = std::string(node_ip_address);
-    client_info.local_scheduler_port = 0;
-    client_info.object_manager_port = 0;
     RAY_CHECK_OK(state->gcs_client.Connect(std::string(redis_primary_addr),
-                                           redis_primary_port, client_info));
+                                           redis_primary_port));
     RAY_CHECK_OK(state->gcs_client.context()->AttachToEventLoop(loop));
   } else {
     state->db = NULL;
@@ -570,6 +565,11 @@ void assign_task_to_worker(LocalSchedulerState *state,
   }
 }
 
+// This is used to allow task_table_update to fail.
+void allow_task_table_update_failure(UniqueID id,
+                                     void *user_context,
+                                     void *user_data) {}
+
 void finish_task(LocalSchedulerState *state, LocalSchedulerClient *worker) {
   if (worker->task_in_progress != NULL) {
     TaskSpec *spec = Task_task_execution_spec(worker->task_in_progress)->Spec();
@@ -627,7 +627,16 @@ void finish_task(LocalSchedulerState *state, LocalSchedulerClient *worker) {
       int task_state = TASK_STATUS_DONE;
       Task_set_state(worker->task_in_progress, task_state);
 #if !RAY_USE_NEW_GCS
-      task_table_update(state->db, worker->task_in_progress, NULL, NULL, NULL);
+      auto retryInfo = RetryInfo{
+          .num_retries = 0,  // This value is unused.
+          .timeout = 0,      // This value is unused.
+          .fail_callback = allow_task_table_update_failure,
+      };
+
+      // We allow this call to fail in case the driver has been removed and the
+      // task table entries have already been cleaned up by the monitor.
+      task_table_update(state->db, worker->task_in_progress, &retryInfo, NULL,
+                        NULL);
 #else
       RAY_CHECK_OK(TaskTableAdd(&state->gcs_client, worker->task_in_progress));
       Task_free(worker->task_in_progress);
@@ -1043,8 +1052,8 @@ void handle_set_actor_frontier(LocalSchedulerState *state,
                                ActorFrontier const &frontier) {
   /* Parse the ActorFrontier flatbuffer. */
   ActorID actor_id = from_flatbuf(*frontier.actor_id());
-  std::unordered_map<ActorID, int64_t, UniqueIDHasher> task_counters;
-  std::unordered_map<ActorID, ObjectID, UniqueIDHasher> frontier_dependencies;
+  std::unordered_map<ActorID, int64_t> task_counters;
+  std::unordered_map<ActorID, ObjectID> frontier_dependencies;
   for (size_t i = 0; i < frontier.handle_ids()->size(); ++i) {
     ActorID handle_id = from_flatbuf(*frontier.handle_ids()->Get(i));
     task_counters[handle_id] = frontier.task_counters()->Get(i);
