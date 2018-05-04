@@ -464,9 +464,11 @@ class Worker(object):
         final_results = self.retrieve_and_deserialize(plain_object_ids, 0)
         # Construct a dictionary mapping object IDs that we haven't gotten yet
         # to their original index in the object_ids argument.
-        unready_ids = dict((plain_object_ids[i].binary(), i)
-                           for (i, val) in enumerate(final_results)
-                           if val is plasma.ObjectNotAvailable)
+        unready_ids = {
+            plain_object_ids[i].binary(): i
+            for (i, val) in enumerate(final_results)
+            if val is plasma.ObjectNotAvailable
+        }
         was_blocked = (len(unready_ids) > 0)
         # Try reconstructing any objects we haven't gotten yet. Try to get them
         # until at least get_timeout_milliseconds milliseconds passes, then
@@ -815,10 +817,9 @@ class Worker(object):
                                               e, None)
             return
         except Exception as e:
-            self._handle_process_task_failure(function_id, return_object_ids,
-                                              e,
-                                              ray.utils.format_error_message(
-                                                  traceback.format_exc()))
+            self._handle_process_task_failure(
+                function_id, return_object_ids, e,
+                ray.utils.format_error_message(traceback.format_exc()))
             return
 
         # Execute the task.
@@ -851,10 +852,9 @@ class Worker(object):
                     outputs = (outputs, )
                 self._store_outputs_in_objstore(return_object_ids, outputs)
         except Exception as e:
-            self._handle_process_task_failure(function_id, return_object_ids,
-                                              e,
-                                              ray.utils.format_error_message(
-                                                  traceback.format_exc()))
+            self._handle_process_task_failure(
+                function_id, return_object_ids, e,
+                ray.utils.format_error_message(traceback.format_exc()))
 
     def _handle_process_task_failure(self, function_id, return_object_ids,
                                      error, backtrace):

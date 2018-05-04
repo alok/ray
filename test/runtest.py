@@ -180,12 +180,10 @@ LIST_OBJECTS = [[obj] for obj in BASE_OBJECTS]
 TUPLE_OBJECTS = [(obj, ) for obj in BASE_OBJECTS]
 # The check that type(obj).__module__ != "numpy" should be unnecessary, but
 # otherwise this seems to fail on Mac OS X on Travis.
-DICT_OBJECTS = (
-    [{
-        obj: obj
-    } for obj in PRIMITIVE_OBJECTS
-     if (obj.__hash__ is not None and type(obj).__module__ != "numpy")] +
-    [{
+DICT_OBJECTS = ([{
+    obj: obj
+} for obj in PRIMITIVE_OBJECTS if (
+    obj.__hash__ is not None and type(obj).__module__ != "numpy")] + [{
         0: obj
     } for obj in BASE_OBJECTS] + [{
         Foo(123): Foo(456)
@@ -255,7 +253,7 @@ class SerializationTest(unittest.TestCase):
 
         # Test sets.
         self.assertEqual(ray.get(f.remote(set())), set())
-        s = set([1, (1, 2, "hi")])
+        s = {1, (1, 2, "hi")}
         self.assertEqual(ray.get(f.remote(s)), s)
 
         # Test types.
@@ -1317,8 +1315,8 @@ class ResourcesTest(unittest.TestCase):
         self.assertEqual(list_of_ids, 10 * [[]])
 
         list_of_ids = ray.get([f1.remote() for _ in range(10)])
-        set_of_ids = set([tuple(gpu_ids) for gpu_ids in list_of_ids])
-        self.assertEqual(set_of_ids, set([(i, ) for i in range(10)]))
+        set_of_ids = {tuple(gpu_ids) for gpu_ids in list_of_ids}
+        self.assertEqual(set_of_ids, {(i, ) for i in range(10)})
 
         list_of_ids = ray.get([f2.remote(), f4.remote(), f4.remote()])
         all_ids = [gpu_id for gpu_ids in list_of_ids for gpu_id in gpu_ids]

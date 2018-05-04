@@ -40,7 +40,8 @@ from .utils import (
     _reindex_helper,
     _co_op_helper,
     _match_partitioning,
-    _concat_index)
+    _concat_index,
+    _correct_column_dtypes)
 from . import get_npartitions
 from .index_metadata import _IndexMetadata
 
@@ -50,7 +51,8 @@ class DataFrame(object):
 
     def __init__(self, data=None, index=None, columns=None, dtype=None,
                  copy=False, col_partitions=None, row_partitions=None,
-                 block_partitions=None, row_metadata=None, col_metadata=None):
+                 block_partitions=None, row_metadata=None, col_metadata=None,
+                 dtypes_cache=None):
         """Distributed DataFrame object backed by Pandas dataframes.
 
         Args:
@@ -74,7 +76,7 @@ class DataFrame(object):
             col_metadata (_IndexMetadata):
                 Metadata for the new dataframe's columns
         """
-        self._row_metadata = self._col_metadata = None
+        self._dtypes_cache = dtypes_cache
 
         # Check type of data and use appropriate constructor
         if data is not None or (col_partitions is None and
@@ -83,6 +85,9 @@ class DataFrame(object):
 
             pd_df = pd.DataFrame(data=data, index=index, columns=columns,
                                  dtype=dtype, copy=copy)
+
+            # Cache dtypes
+            self._dtypes_cache = pd_df.dtypes
 
             # TODO convert _partition_pandas_dataframe to block partitioning.
             row_partitions = \
@@ -100,9 +105,9 @@ class DataFrame(object):
         else:
             # created this invariant to make sure we never have to go into the
             # partitions to get the columns
-            assert columns is not None, \
-                "Columns not defined, must define columns for internal " \
-                "DataFrame creations"
+            assert columns is not None or col_metadata is not None, \
+                "Columns not defined, must define columns or col_metadata " \
+                "for internal DataFrame creations"
 
             if block_partitions is not None:
                 # put in numpy array here to make accesses easier since it's 2D
@@ -112,18 +117,23 @@ class DataFrame(object):
                 if row_partitions is not None:
                     axis = 0
                     partitions = row_partitions
+                    axis_length = len(columns) if columns is not None else \
+                        len(col_metadata)
                 elif col_partitions is not None:
                     axis = 1
                     partitions = col_partitions
+                    axis_length = None
+                    # All partitions will already have correct dtypes
+                    self._dtypes_cache = [
+                            _deploy_func.remote(lambda df: df.dtypes, pd_df)
+                            for pd_df in col_partitions
+                    ]
 
+                # TODO: write explicit tests for "short and wide"
+                # column partitions
                 self._block_partitions = \
                     _create_block_partitions(partitions, axis=axis,
-                                             length=len(columns))
-
-        if row_metadata is not None:
-            self._row_metadata = row_metadata.copy()
-        if col_metadata is not None:
-            self._col_metadata = col_metadata.copy()
+                                             length=axis_length)
 
         # Sometimes we only get a single column or row, which is
         # problematic for building blocks from the partitions, so we
@@ -136,12 +146,24 @@ class DataFrame(object):
 
         # Create the row and column index objects for using our partitioning.
         # If the objects haven't been inherited, then generate them
-        if self._row_metadata is None:
+        if row_metadata is not None:
+            self._row_metadata = row_metadata.copy()
+            if index is not None:
+                self.index = index
+        else:
             self._row_metadata = _IndexMetadata(self._block_partitions[:, 0],
                                                 index=index, axis=0)
-        if self._col_metadata is None:
+
+        if col_metadata is not None:
+            self._col_metadata = col_metadata.copy()
+            if columns is not None:
+                self.columns = columns
+        else:
             self._col_metadata = _IndexMetadata(self._block_partitions[0, :],
                                                 index=columns, axis=1)
+
+        if self._dtypes_cache is None:
+            self._correct_dtypes()
 
     def _get_row_partitions(self):
         return [_blocks_to_row.remote(*part)
@@ -406,6 +428,24 @@ class DataFrame(object):
         result.index = self.columns
         return result
 
+    def _correct_dtypes(self):
+        """Corrects dtypes by concatenating column blocks and then splitting them
+        apart back into the original blocks.
+
+        Also caches ObjectIDs for the dtypes of every column.
+
+        Args:
+            block_partitions: arglist of column blocks.
+        """
+        if self._block_partitions.shape[0] > 1:
+            self._block_partitions = np.array(
+                    [_correct_column_dtypes._submit(
+                     args=column, num_return_vals=len(column))
+                     for column in self._block_partitions.T]).T
+
+        self._dtypes_cache = [_deploy_func.remote(lambda df: df.dtypes, pd_df)
+                              for pd_df in self._block_partitions[0]]
+
     @property
     def dtypes(self):
         """Get the dtypes for this DataFrame.
@@ -413,12 +453,15 @@ class DataFrame(object):
         Returns:
             The dtypes for this DataFrame.
         """
-        # The dtypes are common across all partitions.
-        # The first partition will be enough.
-        result = ray.get(_deploy_func.remote(lambda df: df.dtypes,
-                                             self._row_partitions[0]))
-        result.index = self.columns
-        return result
+        assert self._dtypes_cache is not None
+
+        if isinstance(self._dtypes_cache, list) and \
+                isinstance(self._dtypes_cache[0],
+                           ray.local_scheduler.ObjectID):
+            self._dtypes_cache = pd.concat(ray.get(self._dtypes_cache))
+            self._dtypes_cache.index = self.columns
+
+        return self._dtypes_cache
 
     @property
     def empty(self):
@@ -492,6 +535,7 @@ class DataFrame(object):
 
         if block_partitions is not None:
             self._block_partitions = block_partitions
+
         elif row_partitions is not None:
             self._row_partitions = row_partitions
 
@@ -512,6 +556,9 @@ class DataFrame(object):
             self._row_metadata = _IndexMetadata(
                 self._block_partitions[:, 0], index=index, axis=0)
 
+        # Update dtypes
+        self._correct_dtypes()
+
     def add_prefix(self, prefix):
         """Add a prefix to each of the column names.
 
@@ -521,7 +568,8 @@ class DataFrame(object):
         new_cols = self.columns.map(lambda x: str(prefix) + str(x))
         return DataFrame(block_partitions=self._block_partitions,
                          columns=new_cols,
-                         index=self.index)
+                         col_metadata=self._col_metadata,
+                         row_metadata=self._row_metadata)
 
     def add_suffix(self, suffix):
         """Add a suffix to each of the column names.
@@ -532,7 +580,8 @@ class DataFrame(object):
         new_cols = self.columns.map(lambda x: str(x) + str(suffix))
         return DataFrame(block_partitions=self._block_partitions,
                          columns=new_cols,
-                         index=self.index)
+                         col_metadata=self._col_metadata,
+                         row_metadata=self._row_metadata)
 
     def applymap(self, func):
         """Apply a function to a DataFrame elementwise.
@@ -549,8 +598,8 @@ class DataFrame(object):
             for block in self._block_partitions])
 
         return DataFrame(block_partitions=new_block_partitions,
-                         columns=self.columns,
-                         index=self.index)
+                         row_metadata=self._row_metadata,
+                         col_metadata=self._col_metadata)
 
     def copy(self, deep=True):
         """Creates a shallow copy of the DataFrame.
@@ -560,7 +609,8 @@ class DataFrame(object):
         """
         return DataFrame(block_partitions=self._block_partitions,
                          columns=self.columns,
-                         index=self.index)
+                         index=self.index,
+                         dtypes_cache=self.dtypes)
 
     def groupby(self, by=None, axis=0, level=None, as_index=True, sort=True,
                 group_keys=True, squeeze=False, **kwargs):
@@ -662,8 +712,6 @@ class DataFrame(object):
             lambda df: df.isna(), block) for block in self._block_partitions])
 
         return DataFrame(block_partitions=new_block_partitions,
-                         columns=self.columns,
-                         index=self.index,
                          row_metadata=self._row_metadata,
                          col_metadata=self._col_metadata)
 
@@ -681,8 +729,8 @@ class DataFrame(object):
             for block in self._block_partitions])
 
         return DataFrame(block_partitions=new_block_partitions,
-                         columns=self.columns,
-                         index=self.index)
+                         row_metadata=self._row_metadata,
+                         col_metadata=self._col_metadata)
 
     def keys(self):
         """Get the info axis for the DataFrame.
@@ -1176,13 +1224,13 @@ class DataFrame(object):
         if axis == 0:
             new_cols = _map_partitions(func, self._col_partitions)
             return DataFrame(col_partitions=new_cols,
-                             columns=self.columns,
-                             index=self.index)
+                             row_metadata=self._row_metadata,
+                             col_metadata=self._col_metadata)
         else:
             new_rows = _map_partitions(func, self._row_partitions)
             return DataFrame(row_partitions=new_rows,
-                             columns=self.columns,
-                             index=self.index)
+                             row_metadata=self._row_metadata,
+                             col_metadata=self._col_metadata)
 
     def cummax(self, axis=None, skipna=True, *args, **kwargs):
         """Perform a cumulative maximum across the DataFrame.
@@ -1872,7 +1920,7 @@ class DataFrame(object):
         index = self._row_metadata.index[:n]
 
         return DataFrame(col_partitions=new_dfs,
-                         columns=self.columns,
+                         col_metadata=self._col_metadata,
                          index=index)
 
     def hist(self, data, column=None, by=None, grid=True, xlabelsize=None,
@@ -2572,9 +2620,44 @@ class DataFrame(object):
                                      fill_value)
 
     def mode(self, axis=0, numeric_only=False):
-        raise NotImplementedError(
-            "To contribute to Pandas on Ray, please visit "
-            "github.com/ray-project/ray.")
+        """Perform mode across the DataFrame.
+
+        Args:
+            axis (int): The axis to take the mode on.
+            numeric_only (bool): if True, only apply to numeric columns.
+
+        Returns:
+            DataFrame: The mode of the DataFrame.
+        """
+        axis = pd.DataFrame()._get_axis_number(axis)
+
+        def mode_helper(df):
+            mode_df = df.mode(axis=axis, numeric_only=numeric_only)
+            return mode_df, mode_df.shape[axis]
+
+        def fix_length(df, *lengths):
+            max_len = max(lengths[0])
+            df = df.reindex(pd.RangeIndex(max_len), axis=axis)
+            return df
+
+        parts = self._col_partitions if axis == 0 else self._row_partitions
+
+        result = [_deploy_func._submit(args=(lambda df: mode_helper(df),
+                                             part), num_return_vals=2)
+                  for part in parts]
+
+        parts, lengths = [list(t) for t in zip(*result)]
+
+        parts = [_deploy_func.remote(
+            lambda df, *l: fix_length(df, l), part, *lengths)
+            for part in parts]
+
+        if axis == 0:
+            return DataFrame(col_partitions=parts,
+                             columns=self.columns)
+        else:
+            return DataFrame(row_partitions=parts,
+                             index=self.index)
 
     def mul(self, other, axis='columns', level=None, fill_value=None):
         """Multiplies this DataFrame against another DataFrame/Series/scalar.
@@ -2637,8 +2720,8 @@ class DataFrame(object):
             lambda df: df.notna(), block) for block in self._block_partitions])
 
         return DataFrame(block_partitions=new_block_partitions,
-                         columns=self.columns,
-                         index=self.index)
+                         row_metadata=self._row_metadata,
+                         col_metadata=self._col_metadata)
 
     def notnull(self):
         """Perform notnull across the DataFrame.
@@ -2655,8 +2738,8 @@ class DataFrame(object):
             for block in self._block_partitions])
 
         return DataFrame(block_partitions=new_block_partitions,
-                         columns=self.columns,
-                         index=self.index)
+                         row_metadata=self._row_metadata,
+                         col_metadata=self._col_metadata)
 
     def nsmallest(self, n, columns, keep='first'):
         raise NotImplementedError(
@@ -2821,7 +2904,8 @@ class DataFrame(object):
         if inplace:
             self._update_inplace(row_partitions=new_rows)
         else:
-            return DataFrame(row_partitions=new_rows, columns=self.columns)
+            return DataFrame(row_partitions=new_rows,
+                             col_metadata=self._col_metadata)
 
     def radd(self, other, axis='columns', level=None, fill_value=None):
         return self.add(other, axis, level, fill_value)
@@ -3078,8 +3162,8 @@ class DataFrame(object):
             for block in self._block_partitions])
 
         return DataFrame(block_partitions=new_block_partitions,
-                         columns=self.columns,
-                         index=self.index)
+                         row_metadata=self._row_metadata,
+                         col_metadata=self._col_metadata)
 
     def rpow(self, other, axis='columns', level=None, fill_value=None):
         return self._single_df_op_helper(
@@ -3511,7 +3595,7 @@ class DataFrame(object):
 
         index = self._row_metadata.index[-n:]
         return DataFrame(col_partitions=new_dfs,
-                         columns=self.columns,
+                         col_metadata=self._col_metadata,
                          index=index)
 
     def take(self, indices, axis=0, convert=None, is_copy=True, **kwargs):
@@ -3873,9 +3957,7 @@ class DataFrame(object):
                              index=index)
         else:
             columns = self._col_metadata[key].index
-
-            indices_for_rows = [self.columns.index(new_col)
-                                for new_col in columns]
+            indices_for_rows = [col for col in self.col if col in set(columns)]
 
             new_parts = [_deploy_func.remote(
                 lambda df: df.__getitem__(indices_for_rows),
@@ -3903,8 +3985,8 @@ class DataFrame(object):
 
         index = self.index[key]
         return DataFrame(col_partitions=new_cols,
-                         index=index,
-                         columns=self.columns)
+                         col_metadata=self._col_metadata,
+                         index=index)
 
     def __getattr__(self, key):
         """After regular attribute access, looks up the name in the columns
@@ -4212,8 +4294,8 @@ class DataFrame(object):
             for block in self._block_partitions])
 
         return DataFrame(block_partitions=new_block_partitions,
-                         columns=self.columns,
-                         index=self.index)
+                         col_metadata=self._col_metadata,
+                         row_metadata=self._row_metadata)
 
     def __sizeof__(self):
         raise NotImplementedError(

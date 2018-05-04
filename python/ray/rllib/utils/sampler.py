@@ -59,8 +59,6 @@ class PartialRollout(object):
     def __getitem__(self, key):
         return self.data[key]
 
-CompletedRollout = namedtuple(
-    "CompletedRollout", ["episode_length", "episode_reward"])
     def __setitem__(self, key, item):
         self.data[key] = item
 
@@ -78,6 +76,10 @@ CompletedRollout = namedtuple(
 
     def __contains__(self, x):
         return x in self.data
+
+
+CompletedRollout = namedtuple(
+    "CompletedRollout", ["episode_length", "episode_reward"])
 
 
 class SyncSampler(object):
