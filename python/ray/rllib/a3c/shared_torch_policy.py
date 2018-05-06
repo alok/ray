@@ -33,8 +33,8 @@ class SharedTorchPolicy(TorchPolicy):
         with self.lock:
             ob = Variable(torch.from_numpy(ob).float().unsqueeze(0))
             logits, values = self._model(ob)
-            samples = self._model.probs(logits).multinomial(num_samples=1).squeeze()
             values = values.squeeze()
+            samples = self._model.probs(logits).multinomial(num_samples=1).squeeze()
             return var_to_np(samples), {"vf_preds": var_to_np(values)}
 
     def compute_logits(self, ob, *args):
