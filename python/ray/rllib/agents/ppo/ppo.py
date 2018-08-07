@@ -18,6 +18,8 @@ DEFAULT_CONFIG = with_common_config({
     "use_gae": True,
     # GAE(lambda) parameter
     "lambda": 1.0,
+    # Use PyTorch as backend - no LSTM support
+    "use_pytorch": False,
     # Initial coefficient for KL divergence
     "kl_coeff": 0.2,
     # Number of timesteps collected for each SGD round
@@ -74,14 +76,24 @@ class PPOAgent(Agent):
             extra_gpu=cf["num_gpus_per_worker"] * cf["num_workers"])
 
     def _init(self):
+        _USE_PYTORCH = self.config["use_pytorch"]
+
+        if _USE_PYTORCH:
+            from ray.rllib.agents.ppo.ppo_torch_policy_graph import \
+                    PPOTorchPolicyGraph
+            policy_cls = PPOTorchPolicyGraph
+        else:
+            from ray.rllib.agents.a3c.a3c_tf_policy_graph import A3CPolicyGraph
+            policy_cls = PPOPolicyGraph
+
         self.local_evaluator = self.make_local_evaluator(
-            self.env_creator, PPOPolicyGraph)
+            self.env_creator, policy_cls)
         self.remote_evaluators = self.make_remote_evaluators(
-            self.env_creator, PPOPolicyGraph, self.config["num_workers"], {
+            self.env_creator, policy_cls, self.config["num_workers"], {
                 "num_cpus": self.config["num_cpus_per_worker"],
                 "num_gpus": self.config["num_gpus_per_worker"]
             })
-        if self.config["simple_optimizer"]:
+        if self.config["simple_optimizer"] or _USE_PYTORCH:
             self.optimizer = SyncSamplesOptimizer(
                 self.local_evaluator, self.remote_evaluators, {
                     "num_sgd_iter": self.config["num_sgd_iter"],
@@ -101,6 +113,7 @@ class PPOAgent(Agent):
     def _train(self):
         prev_steps = self.optimizer.num_steps_sampled
         fetches = self.optimizer.step()
+        # TODO add KL support for PyTorch
         if "kl" in fetches:
             # single-agent
             self.local_evaluator.for_policy(
